@@ -38,12 +38,41 @@
 
 ## Установка
 
+**macOS / Linux:**
+
 ```bash
 cd tg_job_bot
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+**Windows** (в т.ч. если проект в синхронизируемой папке и уже есть macOS-`.venv`):
+
+Виртуальное окружение **не переносится между ОС** — на Windows нужно создать своё,
+под отдельным именем `.venv-win` (чтобы оно не конфликтовало с macOS-`.venv` при
+синхронизации). Сначала установите [Python 3.11+](https://www.python.org/downloads/)
+(при установке отметьте **«Add Python to PATH»**), затем:
+
+```bat
+cd tg_job_bot
+py -m venv .venv-win
+.venv-win\Scripts\pip install -r requirements.txt
+```
+
+Запуск на Windows — интерпретатором из этого окружения:
+
+```bat
+.venv-win\Scripts\python main.py --init
+.venv-win\Scripts\python main.py
+```
+
+> ⚠️ **Синхронизируемая папка (Yandex.Disk и т.п.):** не запускайте бота на двух
+> машинах **одновременно** — общая база `job_bot.sqlite3` (+ WAL-файлы) при
+> параллельной записи может повредиться. Работайте по очереди на одной машине;
+> общие `.env` и база означают общее состояние (обработанные посты не задвоятся).
+> По возможности исключите папки `.venv`/`.venv-win` из синхронизации — они большие
+> и машинно-зависимые.
 
 ## Конфигурация
 
@@ -163,6 +192,25 @@ cp positions.txt.example positions.txt
 
 ## Запуск
 
+### Быстрый способ — скрипты-обёртки
+
+В проекте есть готовые скрипты, которые сами создадут окружение (если его нет) и
+запустят бота. Аргументы (`--init`) пробрасываются.
+
+```bash
+./run.sh --init      # macOS/Linux: тихий первый проход
+./run.sh             # macOS/Linux: обычная работа
+```
+```bat
+run.bat --init       :: Windows: тихий первый проход
+run.bat              :: Windows: обычная работа
+```
+
+> На macOS/Linux один раз сделайте скрипт исполняемым: `chmod +x run.sh`.
+> `run.sh` использует окружение `.venv`, `run.bat` — `.venv-win`.
+
+### Вручную
+
 Все команды — из папки проекта, одной строкой. Интерпретатор берём из venv.
 
 **Шаг 1. Первый запуск — тихий** (обязательно первым). Помечает текущие старые
@@ -198,6 +246,8 @@ tg_job_bot/
 ├── resume.txt.example    # шаблон резюме (точный поиск)
 ├── positions.txt.example # шаблон профиля (широкий поиск по позициям)
 ├── requirements.txt
+├── run.sh                # запуск на macOS/Linux (создаёт .venv)
+├── run.bat               # запуск на Windows (создаёт .venv-win)
 ├── README.md
 ├── config.py             # чтение и валидация переменных окружения
 ├── db.py                 # SQLite: seen_posts, matches
