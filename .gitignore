@@ -1,0 +1,30 @@
+# Секреты — НИКОГДА не коммитить (в репозитории остаётся только .env.example)
+.env
+
+# Личные данные: реальные резюме/профиль (в репо только *.example)
+resume.txt
+positions.txt
+
+# Виртуальное окружение (пересоздаётся на каждой машине)
+.venv/
+venv/
+
+# Сессии Telethon (если вдруг появятся)
+*.session
+
+# База данных и логи бота
+job_bot.sqlite3
+job_bot.sqlite3-shm
+job_bot.sqlite3-wal
+job_bot.log
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Служебные файлы ОС/редактора
+.DS_Store
+
+# Локальные настройки Claude Code (машинно-зависимые пути, разрешения)
+.claude/settings.local.json
