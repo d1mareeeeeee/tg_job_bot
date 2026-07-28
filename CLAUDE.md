@@ -13,6 +13,9 @@
 - `llm_client.py` — абстракция LLM (OpenAI/Anthropic/Gemini) + `PROMPT_TEMPLATE`.
 - `notifier.py` — отправка уведомлений через Telegram Bot API (httpx).
 - `db.py` — SQLite: `seen_posts`, `matches`.
+- `dev_tests/` — ручные проверки (не pytest, запускаются напрямую): `test_seen_logic.py`
+  — 39 проверок `run_cycle`/`main_loop` на заглушках, без сети; `test_live_error.py`
+  — живая проверка доставки ошибок, **шлёт реальные сообщения** (см. ниже).
 - `resume.txt` / `positions.txt` — критерии оценки (см. `RESUME_PATH`); реальные
   файлы gitignored, в репозитории только шаблоны `*.example`.
 
@@ -76,7 +79,11 @@
   `.venv/`, `job_bot.sqlite3*`, `job_bot.log`, `.claude/settings.local.json`.
 - **Коммитить** только шаблоны: `.env.example`, `resume.txt.example`,
   `positions.txt.example` — в них ТОЛЬКО плейсхолдеры, без реальных значений.
-- В `README.md` и `*.example` не должно быть реальных данных: chat_id, токена бота,
-  ключа OpenRouter, реального списка каналов. Использовать placeholder'ы.
+- В `README.md`, `*.example` и `dev_tests/` не должно быть реальных данных: chat_id,
+  токена бота, ключа OpenRouter, реальных имён каналов. Использовать placeholder'ы
+  (в тестах — `testch` / `testchannel`).
+- `dev_tests/` — коммитить (заглушки и плейсхолдеры, секретов нет). `test_live_error.py`
+  берёт токен из `.env` и **шлёт реальные сообщения в личку**: без флага не делает
+  ничего, запускать только осознанно (`--call` / `--parse` / `--crash` / `--all`).
 - `CLAUDE.md` — коммитить (общий контекст, без секретов). Обновлять вручную после
   значимых изменений поведения бота.
