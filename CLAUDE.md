@@ -84,8 +84,15 @@
 (+ `LLM_BASE_URL` для OpenRouter). Остальное — с дефолтами (см. `.env.example`).
 
 ## Git / приватность (проект готовится к публикации на GitHub)
-- **Не коммитить** (в `.gitignore`): `.env`, `resume.txt`, `positions.txt`,
-  `.venv/`, `job_bot.sqlite3*`, `job_bot.log`, `.claude/settings.local.json`.
+- **Не коммитить** (в `.gitignore`): `.env` и все варианты `.env.*` (кроме
+  `.env.example`), `resume.txt`, `positions.txt`, `.venv*/`, `job_bot.sqlite3*`,
+  `job_bot.log`, `.claude/` целиком, а также превентивно ключи и сертификаты
+  (`*.pem`, `*.key`, `*.p12`, `id_rsa*`, `*credentials*`, `*secrets*`, `*.sql`).
+  Игнорируется именно папка `.claude/`, а не один файл в ней: иначе любой новый
+  файл внутри попадёт в коммит вместе с машинно-зависимыми путями.
+- **Токен бота маскируется в логах** (`notifier._redact`): он вшит в URL Bot API,
+  поэтому теоретически может просочиться в текст исключения или ответа сервера.
+  Логи часто прикладывают к issue — не убирать эту страховку.
 - **Коммитить** только шаблоны: `.env.example`, `resume.txt.example`,
   `positions.txt.example` — в них ТОЛЬКО плейсхолдеры, без реальных значений.
 - В `README.md`, `*.example` и `dev_tests/` не должно быть реальных данных: chat_id,

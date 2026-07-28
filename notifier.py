@@ -17,6 +17,17 @@ logger = logging.getLogger(__name__)
 _TG_MAX_LEN = 4096
 
 
+def _redact(value, token: str) -> str:
+    """Прячет токен бота в тексте перед записью в лог.
+
+    Токен вшит в URL Bot API, поэтому теоретически может просочиться в текст
+    исключения или ответа сервера. На практике httpx в перехватываемых здесь
+    ошибках URL не показывает, но лог часто прикладывают к issue — страхуемся.
+    """
+    text = str(value)
+    return text.replace(token, "***") if token else text
+
+
 def _build_message(match: dict) -> str:
     """Собирает текст уведомления: оценка + текст вакансии без изменений + ссылка.
 
@@ -82,7 +93,10 @@ async def send_error(
     try:
         await _send_text(config, _build_error_message(title, details), http_client)
     except Exception as exc:  # noqa: BLE001 — отправка отчёта об ошибке не критична
-        logger.error("Не удалось отправить уведомление об ошибке: %s", exc)
+        logger.error(
+            "Не удалось отправить уведомление об ошибке: %s",
+            _redact(exc, config.notify_bot_token),
+        )
 
 
 async def _send_text(config, text: str, http_client: httpx.AsyncClient) -> None:
@@ -97,10 +111,12 @@ async def _send_text(config, text: str, http_client: httpx.AsyncClient) -> None:
         "disable_web_page_preview": False,
     }
 
+    token = config.notify_bot_token
+
     try:
         resp = await http_client.post(url, json=payload, timeout=30.0)
     except httpx.HTTPError as exc:
-        logger.error("Сетевая ошибка при отправке уведомления: %s", exc)
+        logger.error("Сетевая ошибка при отправке уведомления: %s", _redact(exc, token))
         return
 
     if resp.status_code == 200:
@@ -114,12 +130,15 @@ async def _send_text(config, text: str, http_client: httpx.AsyncClient) -> None:
         try:
             retry = await http_client.post(url, json=payload, timeout=30.0)
             if retry.status_code != 200:
-                logger.error("Повторная отправка не удалась: %s %s", retry.status_code, retry.text)
+                logger.error(
+                    "Повторная отправка не удалась: %s %s",
+                    retry.status_code, _redact(retry.text, token),
+                )
         except httpx.HTTPError as exc:
-            logger.error("Сетевая ошибка при повторной отправке: %s", exc)
+            logger.error("Сетевая ошибка при повторной отправке: %s", _redact(exc, token))
         return
 
-    logger.error("Bot API вернул ошибку %s: %s", resp.status_code, resp.text)
+    logger.error("Bot API вернул ошибку %s: %s", resp.status_code, _redact(resp.text, token))
 
 
 def _extract_retry_after(resp: httpx.Response) -> float:
