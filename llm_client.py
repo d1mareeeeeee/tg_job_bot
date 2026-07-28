@@ -25,8 +25,27 @@ PROMPT_TEMPLATE = """Ты — карьерный ассистент. Ниже р
 Резюме: {resume_text}
 Вакансия: {vacancy_text}"""
 
-# Ответ по умолчанию при ошибке разбора / вызова LLM.
-_FALLBACK = {"score": 0, "fit": False, "role": "", "reason": "parse_error"}
+class LLMError(Exception):
+    """Оценка не получена. База для конкретных причин сбоя."""
+
+
+class LLMCallError(LLMError):
+    """Провайдер не ответил (429, сеть, таймаут, сбой SDK).
+
+    Повторяемая ошибка: пост НЕ помечается seen и вернётся в следующем цикле.
+    """
+
+
+class LLMParseError(LLMError):
+    """Провайдер ответил, но разобрать ответ как JSON не удалось.
+
+    Не повторяем (модель, скорее всего, намусорит снова) — пост уходит
+    пользователю с пометкой об ошибке, чтобы вакансия не потерялась.
+    """
+
+
+# Значения по умолчанию для полей результата (шаблон схемы для _normalize).
+_DEFAULTS = {"score": 0, "fit": False, "role": "", "reason": ""}
 
 
 def _parse_json(raw: str) -> dict:
@@ -34,11 +53,11 @@ def _parse_json(raw: str) -> dict:
 
     Модель иногда оборачивает JSON в ```json ... ``` или добавляет текст вокруг.
     Снимаем обёртку, находим первый объект {...} регэкспом и парсим.
-    При неудаче возвращаем безопасный fallback (score=0) и логируем.
+
+    :raises LLMParseError: если разобрать ответ не удалось.
     """
     if not raw:
-        logger.warning("LLM вернула пустой ответ")
-        return dict(_FALLBACK)
+        raise LLMParseError("LLM вернула пустой ответ")
 
     text = raw.strip()
 
@@ -50,21 +69,19 @@ def _parse_json(raw: str) -> dict:
     # Находим первый JSON-объект в тексте.
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        logger.warning("Не найден JSON в ответе LLM: %r", raw[:200])
-        return dict(_FALLBACK)
+        raise LLMParseError(f"не найден JSON в ответе LLM: {raw[:200]!r}")
 
     try:
         data = json.loads(match.group(0))
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("Ошибка парсинга JSON из ответа LLM: %s | %r", exc, raw[:200])
-        return dict(_FALLBACK)
+        raise LLMParseError(f"битый JSON в ответе LLM: {exc} | {raw[:200]!r}") from exc
 
     return _normalize(data)
 
 
 def _normalize(data: dict) -> dict:
     """Приводит результат к ожидаемой схеме: score 0-100 int, есть все ключи."""
-    result = dict(_FALLBACK)
+    result = dict(_DEFAULTS)
     result.update({k: data.get(k, result[k]) for k in result})
 
     # score → int в диапазоне [0, 100].
@@ -89,16 +106,20 @@ class BaseLLMClient(ABC):
         self.base_url = base_url
 
     def score_vacancy(self, resume_text: str, vacancy_text: str) -> dict:
-        """Оценивает соответствие вакансии резюме. Возвращает нормализованный dict."""
+        """Оценивает соответствие вакансии резюме. Возвращает нормализованный dict.
+
+        :raises LLMCallError: провайдер не ответил (повторяемо).
+        :raises LLMParseError: ответ провайдера не разобран.
+        """
         prompt = PROMPT_TEMPLATE.format(
             resume_text=resume_text,
             vacancy_text=vacancy_text,
         )
         try:
             raw = self._complete(prompt)
-        except Exception as exc:  # noqa: BLE001 — любой сбой SDK не должен ронять цикл
+        except Exception as exc:  # noqa: BLE001 — любой сбой SDK, наружу отдаём LLMCallError
             logger.error("Ошибка вызова LLM (%s): %s", self.model, exc)
-            return dict(_FALLBACK)
+            raise LLMCallError(str(exc)) from exc
         return _parse_json(raw)
 
     @abstractmethod

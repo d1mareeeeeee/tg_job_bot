@@ -57,6 +57,13 @@ class Config:
     llm_rate_delay: float = 1.0
     notify_rate_delay: float = 1.0
 
+    # --- Реакция на сбои LLM ---
+    # Сколько сбоев вызова подряд считать «провайдер лежит»: цикл прерывается,
+    # необработанные посты остаются не-seen и берутся в следующем цикле.
+    llm_failure_streak: int = 3
+    # На сколько минут уснуть после такой серии сбоев (вместо обычного интервала).
+    llm_backoff_minutes: int = 30
+
     # --- Веб-парсер t.me/s/ ---
     http_user_agent: str = ""
     http_timeout: float = 20.0
@@ -211,6 +218,8 @@ def load_config(*, first_run_silent_override: bool | None = None) -> Config:
         first_run_silent=first_run_silent,
         llm_rate_delay=_get_float("LLM_RATE_DELAY", 1.0),
         notify_rate_delay=_get_float("NOTIFY_RATE_DELAY", 1.0),
+        llm_failure_streak=_get_int("LLM_FAILURE_STREAK", 3),
+        llm_backoff_minutes=_get_int("LLM_BACKOFF_MINUTES", 30),
         http_user_agent=os.getenv("HTTP_USER_AGENT", "").strip(),
         http_timeout=_get_float("HTTP_TIMEOUT", 20.0),
         resume_path=os.getenv("RESUME_PATH", "resume.txt").strip() or "resume.txt",
