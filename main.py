@@ -22,6 +22,7 @@ import asyncio
 import logging
 import signal
 import sys
+from dataclasses import replace
 
 import httpx
 
@@ -237,11 +238,26 @@ async def main_loop(config: Config) -> None:
     interval = config.poll_interval_minutes * 60
     # Сигнатура последнего падения — чтобы не слать одно и то же каждый цикл.
     last_crash: str | None = None
+    # Первый цикл после запуска смотрит канал шире: за перерыв (ночь, выходные)
+    # могло выйти больше постов, чем помещается в обычное окно, а всё, что в него
+    # не попало, теряется безвозвратно — окно движется только вперёд.
+    first_cycle = True
     try:
         while not stop_event.is_set():
             backoff = False
+            if first_cycle and config.startup_lookback_messages > config.lookback_messages:
+                cycle_config = replace(
+                    config, lookback_messages=config.startup_lookback_messages
+                )
+                logger.info(
+                    "Первый цикл после запуска: окно расширено до %d постов на канал "
+                    "(дальше — %d).",
+                    config.startup_lookback_messages, config.lookback_messages,
+                )
+            else:
+                cycle_config = config
             try:
-                backoff = await run_cycle(config, reader, llm, http_client, resume_text)
+                backoff = await run_cycle(cycle_config, reader, llm, http_client, resume_text)
             except Exception as exc:  # noqa: BLE001 — цикл не должен падать целиком
                 logger.exception("Ошибка в цикле обработки: %s", exc)
                 crash = f"{type(exc).__name__}: {exc}"
@@ -263,6 +279,9 @@ async def main_loop(config: Config) -> None:
                 last_crash = crash
             else:
                 last_crash = None  # цикл прошёл — следующее падение снова уведомим
+                # Окно сужаем только после удачного цикла: если он упал, посты не
+                # помечены seen, и на повторе широкое окно ещё пригодится.
+                first_cycle = False
 
             # После первого тихого прохода дальше работаем в обычном режиме.
             if config.first_run_silent:
@@ -295,8 +314,6 @@ async def main_loop(config: Config) -> None:
 
 def _clear_first_run_silent(config: Config) -> Config:
     """Возвращает копию конфигурации с выключенным тихим режимом."""
-    from dataclasses import replace
-
     return replace(config, first_run_silent=False)
 
 

@@ -51,6 +51,10 @@ class Config:
     match_threshold: int = 70
     poll_interval_minutes: int = 30
     lookback_messages: int = 50
+    # Окно первого цикла после запуска: за перерыв (ночь, выходные) могло выйти
+    # больше постов, чем помещается в обычное окно, а не попавшее в него теряется
+    # безвозвратно. Дальше окно возвращается к lookback_messages.
+    startup_lookback_messages: int = 100
     first_run_silent: bool = False
 
     # --- Rate-limit (секунды между вызовами) ---
@@ -215,6 +219,7 @@ def load_config(*, first_run_silent_override: bool | None = None) -> Config:
         match_threshold=_get_int("MATCH_THRESHOLD", 70),
         poll_interval_minutes=_get_int("POLL_INTERVAL_MINUTES", 30),
         lookback_messages=_get_int("LOOKBACK_MESSAGES", 50),
+        startup_lookback_messages=_get_int("STARTUP_LOOKBACK_MESSAGES", 100),
         first_run_silent=first_run_silent,
         llm_rate_delay=_get_float("LLM_RATE_DELAY", 1.0),
         notify_rate_delay=_get_float("NOTIFY_RATE_DELAY", 1.0),
