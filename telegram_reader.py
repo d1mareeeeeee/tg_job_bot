@@ -32,6 +32,22 @@ POSTS_PER_PAGE = 20
 PAGE_DELAY = 0.5
 
 
+def _describe(exc: Exception) -> str:
+    """Читаемое описание исключения для лога.
+
+    У сетевых исключений httpx (`ConnectTimeout`, `ConnectError`) текст часто пустой,
+    и в логе оставалось «Сетевая ошибка при чтении канала X: » без причины. Поэтому
+    всегда пишем класс исключения, а таймауты/отказы соединения дополняем подсказкой:
+    на практике это выключенный VPN там, где Telegram заблокирован.
+    """
+    name = type(exc).__name__
+    text = str(exc).strip()
+    described = f"{name}: {text}" if text else name
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+        described += " (до t.me не дозвонились — сеть/файрвол/выключенный VPN?)"
+    return described
+
+
 class WebReader:
     """Читает новые посты из каналов, парся публичное веб-превью t.me/s/."""
 
@@ -65,18 +81,26 @@ class WebReader:
         channels: list[str],
         lookback: int,
         is_seen,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], bool]:
         """Возвращает новые (не seen) текстовые посты из всех каналов.
 
         :param channels: список каналов (username; инвайт-ссылки не поддержаны).
         :param lookback: сколько последних постов проверять на канал.
         :param is_seen: функция is_seen(channel, msg_id) -> bool.
-        :return: список dict-ов {channel, msg_id, text, url}.
+        :return: (список dict-ов {channel, msg_id, text, url}, флаг «каналы недоступны»).
 
         Ошибка на одном канале (нет доступа, сеть, таймаут) логируется и не
         прерывает обработку остальных.
+
+        Второй элемент — True, когда до t.me не удалось добраться ни по одному каналу.
+        Это не «пустой цикл», а полное отсутствие чтения, и вызывающий код обязан о нём
+        знать: пустой список постов в таком случае ничего не говорит о каналах, а
+        стартовое окно (`STARTUP_LOOKBACK_MESSAGES`) сужать нельзя — иначе оно тратится
+        на цикл, который ничего не прочитал.
         """
         posts: list[dict] = []
+        attempted = 0  # каналов, до которых реально дошли (без приватных)
+        network_failures = 0  # из них не прочитано из-за сети/таймаута
         for channel in channels:
             # Приватные каналы/инвайты веб-парсером недоступны — предупреждаем.
             if channel.startswith(("+", "joinchat/")):
@@ -86,14 +110,31 @@ class WebReader:
                     channel,
                 )
                 continue
+            attempted += 1
             try:
                 channel_posts = await self._fetch_channel(channel, lookback, is_seen)
                 posts.extend(channel_posts)
             except (httpx.HTTPError, httpx.TimeoutException) as exc:
-                logger.error("Сетевая ошибка при чтении канала %s: %s", channel, exc)
+                network_failures += 1
+                logger.error(
+                    "Сетевая ошибка при чтении канала %s: %s", channel, _describe(exc)
+                )
             except Exception as exc:  # noqa: BLE001 — один канал не должен ронять цикл
-                logger.error("Не удалось прочитать канал %s: %s", channel, exc)
-        return posts
+                logger.error("Не удалось прочитать канал %s: %s", channel, _describe(exc))
+
+        # Сеть подвела на всех каналах — почти наверняка нет доступа к t.me целиком,
+        # а не проблема конкретного канала. Самая частая причина — выключенный VPN.
+        channels_unreadable = bool(attempted) and network_failures == attempted
+        if channels_unreadable:
+            logger.error(
+                "Ни один из %d каналов не прочитан: соединение с t.me не установлено. "
+                "Проверьте доступ к Telegram с этой машины — если он у провайдера "
+                "заблокирован, включите VPN (перезапускать бота не нужно, следующий "
+                "цикл попробует снова). Быстрая проверка: открывается ли "
+                "https://t.me/s/<имя_канала> в браузере.",
+                attempted,
+            )
+        return posts, channels_unreadable
 
     async def _fetch_channel(self, channel: str, lookback: int, is_seen) -> list[dict]:
         """Читает последние посты одного канала через t.me/s/, отсеивая seen.

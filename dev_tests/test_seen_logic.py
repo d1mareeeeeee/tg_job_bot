@@ -43,13 +43,41 @@ sent_errors: list[str] = []
 
 
 class StubReader:
-    """Отдаёт фиксированный набор постов."""
+    """Отдаёт фиксированный набор постов. Каналы считаются прочитанными."""
 
     def __init__(self, posts):
         self._posts = posts
 
     async def fetch_new_posts(self, channels, lookback, is_seen):
-        return [p for p in self._posts if not is_seen(p["channel"], p["msg_id"])]
+        new = [p for p in self._posts if not is_seen(p["channel"], p["msg_id"])]
+        return new, False
+
+
+class UnreadableReader:
+    """Читатель, у которого каналы недоступны (нет доступа к t.me).
+
+    Записывает окно (`lookback`) каждого цикла и через `stop_after` циклов бросает
+    CancelledError — так тест выходит из бесконечного main_loop. `unreadable` можно
+    задать списком: по одному значению на цикл (для проверки восстановления связи).
+    """
+
+    def __init__(self, unreadable, stop_after=3):
+        self._unreadable = list(unreadable)
+        self._stop_after = stop_after
+        self.lookbacks: list[int] = []
+
+    async def start(self):
+        pass
+
+    async def disconnect(self):
+        pass
+
+    async def fetch_new_posts(self, channels, lookback, is_seen):
+        if len(self.lookbacks) >= self._stop_after:
+            raise asyncio.CancelledError()
+        self.lookbacks.append(lookback)
+        i = min(len(self.lookbacks) - 1, len(self._unreadable) - 1)
+        return [], self._unreadable[i]
 
 
 class StubLLM:
@@ -106,8 +134,8 @@ async def run(config, posts, outcomes):
     sent_messages.clear()
     sent_errors.clear()
     llm = StubLLM(outcomes)
-    backoff = await m.run_cycle(config, StubReader(posts), llm, None, "резюме кандидата")
-    return backoff, llm
+    result = await m.run_cycle(config, StubReader(posts), llm, None, "резюме кандидата")
+    return result, llm
 
 
 def check(label, condition, detail=""):
@@ -136,8 +164,8 @@ async def main() -> int:
     # --- 1. Сбой вызова LLM: посты НЕ закрываются, после 3 подряд — backoff ---
     print("\n=== 1. LLMCallError x5 (порог серии 3) ===")
     posts = make_posts(5)
-    backoff, llm = await run(base, posts, [LLMCallError("429")] * 5)
-    ok &= check("backoff запрошен", backoff is True)
+    result, llm = await run(base, posts, [LLMCallError("429")] * 5)
+    ok &= check("backoff запрошен", result.backoff is True)
     ok &= check("прервались на 3-м сбое", llm.calls == 3, f"вызовов={llm.calls}")
     ok &= check("ни один пост не помечен seen", seen_ids() == [], f"seen={seen_ids()}")
     ok &= check("вакансий не отправлено", sent_messages == [])
@@ -159,9 +187,9 @@ async def main() -> int:
     # --- 2. Те же посты в следующем цикле: LLM ожила ---
     print("\n=== 2. Повтор тех же постов после восстановления LLM ===")
     good = {"score": 90, "fit": True, "role": "ML Engineer", "reason": "подходит"}
-    backoff, llm = await run(base, posts, [good] * 5)
+    result, llm = await run(base, posts, [good] * 5)
     ok &= check("посты вернулись в обработку", llm.calls == 5, f"вызовов={llm.calls}")
-    ok &= check("backoff не нужен", backoff is False)
+    ok &= check("backoff не нужен", result.backoff is False)
     ok &= check("все 5 закрыты как seen", seen_ids() == [1, 2, 3, 4, 5], f"seen={seen_ids()}")
     ok &= check("отправлено 5 уведомлений", len(sent_messages) == 5, f"={len(sent_messages)}")
     ok &= check("сообщений об ошибках нет", sent_errors == [], f"={sent_errors}")
@@ -172,7 +200,7 @@ async def main() -> int:
     posts3 = [
         {"channel": "testch", "msg_id": 10, "text": VACANCY, "url": "https://t.me/testch/10"}
     ]
-    backoff, llm = await run(base, posts3, [LLMParseError("битый JSON")])
+    result, llm = await run(base, posts3, [LLMParseError("битый JSON")])
     ok &= check("пост помечен seen", 10 in seen_ids(), f"seen={seen_ids()}")
     ok &= check("уведомление отправлено", len(sent_messages) == 1)
     if sent_messages:
@@ -190,7 +218,7 @@ async def main() -> int:
         {"channel": "testch", "msg_id": 21, "text": NOT_VACANCY, "url": "https://t.me/testch/21"},
     ]
     low = {"score": 5, "fit": False, "role": "QA", "reason": "не подходит"}
-    backoff, llm = await run(base, posts4, [low])
+    result, llm = await run(base, posts4, [low])
     ok &= check("LLM вызвана только для вакансии", llm.calls == 1, f"вызовов={llm.calls}")
     ok &= check("оба поста закрыты", {20, 21} <= set(seen_ids()), f"seen={seen_ids()}")
     ok &= check("ничего не отправлено", sent_messages == [])
@@ -201,7 +229,7 @@ async def main() -> int:
     posts5 = [
         {"channel": "testch", "msg_id": 30, "text": VACANCY, "url": "https://t.me/testch/30"}
     ]
-    backoff, llm = await run(silent, posts5, [good])
+    result, llm = await run(silent, posts5, [good])
     ok &= check("LLM не вызывалась", llm.calls == 0)
     ok &= check("пост помечен seen", 30 in seen_ids())
     ok &= check("ничего не отправлено", sent_messages == [])
@@ -213,8 +241,8 @@ async def main() -> int:
         for i in (40, 41, 42, 43, 44)
     ]
     mixed = [LLMCallError("429"), good, LLMCallError("429"), good, LLMCallError("429")]
-    backoff, llm = await run(base, posts6, mixed)
-    ok &= check("backoff НЕ запрошен", backoff is False)
+    result, llm = await run(base, posts6, mixed)
+    ok &= check("backoff НЕ запрошен", result.backoff is False)
     ok &= check("обработаны все 5", llm.calls == 5, f"вызовов={llm.calls}")
     ok &= check("сбойные посты остались открытыми",
                 not ({40, 42, 44} & set(seen_ids())), f"seen={seen_ids()}")
@@ -275,6 +303,61 @@ async def main() -> int:
     if len(sent_errors) == 2:
         ok &= check("  первое — про залоченную базу", "база залочена" in sent_errors[0])
         ok &= check("  второе — про другую ошибку", "другая ошибка" in sent_errors[1])
+
+    # --- 8. Недоступные каналы не съедают широкое стартовое окно ---
+    # Гоняем настоящий main_loop с настоящим run_cycle, подменив только читателя:
+    # он «не смог прочитать ни один канал» и запоминает окно каждого цикла.
+    print("\n=== 8. Недоступные каналы и стартовое окно (реальный main_loop) ===")
+
+    loop_base = replace(
+        base,
+        poll_interval_minutes=0,          # интервал 0 → цикл без ожидания
+        lookback_messages=20,
+        startup_lookback_messages=100,
+        resume_path="resume.txt",
+        llm_api_key="dummy",
+        llm_model="dummy/model",
+        notify_bot_token="dummy",
+        notify_chat_id="0",
+    )
+
+    async def run_loop_with(reader):
+        """Прогоняет main_loop с подменённым читателем до его CancelledError."""
+        sent_errors.clear()
+        db.close_db()  # main_loop сам вызовет init_db
+        real_web_reader = m.WebReader
+        m.WebReader = lambda **kwargs: reader
+        try:
+            await m.main_loop(
+                replace(loop_base, db_path=os.path.join(tempfile.mkdtemp(), "win.sqlite3"))
+            )
+        except asyncio.CancelledError:
+            pass  # штатный выход из теста
+        finally:
+            m.WebReader = real_web_reader
+
+    unreadable = UnreadableReader([True], stop_after=3)
+    await run_loop_with(unreadable)
+    ok &= check("окно осталось широким во всех 3 циклах",
+                unreadable.lookbacks == [100, 100, 100], f"окна={unreadable.lookbacks}")
+    ok &= check("о недоступности сообщили один раз, а не каждый цикл",
+                len(sent_errors) == 1, f"сообщений={len(sent_errors)}")
+    if sent_errors:
+        ok &= check("  в сообщении есть подсказка про VPN", "VPN" in sent_errors[0])
+        print("\n--- как выглядит сообщение о недоступности ---")
+        print(sent_errors[0])
+        print()
+
+    # Связь появилась во втором цикле: окно сужается только с третьего.
+    recovering = UnreadableReader([True, False], stop_after=3)
+    await run_loop_with(recovering)
+    ok &= check("после восстановления окно сузилось",
+                recovering.lookbacks == [100, 100, 20], f"окна={recovering.lookbacks}")
+    ok &= check("два сообщения: инцидент и его конец",
+                len(sent_errors) == 2, f"сообщений={len(sent_errors)}")
+    if len(sent_errors) == 2:
+        ok &= check("  второе — о восстановлении", "восстановил" in sent_errors[1],
+                    repr(sent_errors[1][:40]))
 
     print("\n=== ИТОГ:", "ВСЁ ПРОШЛО" if ok else "ЕСТЬ ПАДЕНИЯ", "===")
     return 0 if ok else 1

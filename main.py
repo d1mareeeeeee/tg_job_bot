@@ -23,6 +23,7 @@ import logging
 import signal
 import sys
 from dataclasses import replace
+from typing import NamedTuple
 
 import httpx
 
@@ -64,20 +65,30 @@ def load_resume(path: str) -> str:
     return text
 
 
+class CycleResult(NamedTuple):
+    """Итог цикла для планировщика."""
+
+    # Провайдер похоже лежит (серия сбоев подряд) — стоит уйти в длинную паузу
+    # вместо обычного интервала.
+    backoff: bool = False
+    # Ни один канал не прочитан (нет доступа к t.me: сеть, файрвол, выключенный VPN).
+    # Такой цикл не считается удачным: стартовое окно сужать нельзя.
+    channels_unreadable: bool = False
+
+
 async def run_cycle(
     config: Config,
     reader: WebReader,
     llm,
     http_client: httpx.AsyncClient,
     resume_text: str,
-) -> bool:
+) -> CycleResult:
     """Выполняет один цикл обработки. Ведёт статистику и логирует её в конце.
 
     Пост помечается seen только когда он действительно обработан. Если LLM не
     ответила (`LLMCallError`), пост остаётся не-seen и вернётся в следующем цикле.
 
-    :return: True, если провайдер похоже лежит (серия сбоев подряд) и вызывающему
-        коду стоит уйти в длинную паузу вместо обычного интервала.
+    :return: `CycleResult` — нужна ли длинная пауза и удалось ли вообще прочитать каналы.
     """
     checked = 0        # всего проверено новых постов
     passed_filter = 0  # прошло префильтр
@@ -90,7 +101,7 @@ async def run_cycle(
     backoff = False    # провайдер лежит — просим вызывающего уйти в паузу
     error_notices = 0  # отправлено сообщений об ошибках (ограничиваем флуд)
 
-    posts = await reader.fetch_new_posts(
+    posts, channels_unreadable = await reader.fetch_new_posts(
         channels=config.channels,
         lookback=config.lookback_messages,
         is_seen=db.is_seen,
@@ -206,7 +217,7 @@ async def run_cycle(
         "сбоев LLM=%d, ошибок парсинга=%d, отправлено=%d",
         mode, checked, passed_filter, scored, call_errors, parse_errors, sent,
     )
-    return backoff
+    return CycleResult(backoff=backoff, channels_unreadable=channels_unreadable)
 
 
 async def main_loop(config: Config) -> None:
@@ -238,6 +249,8 @@ async def main_loop(config: Config) -> None:
     interval = config.poll_interval_minutes * 60
     # Сигнатура последнего падения — чтобы не слать одно и то же каждый цикл.
     last_crash: str | None = None
+    # Уже сообщили, что каналы не читаются — не повторяем это каждый цикл.
+    unreadable_notified = False
     # Первый цикл после запуска смотрит канал шире: за перерыв (ночь, выходные)
     # могло выйти больше постов, чем помещается в обычное окно, а всё, что в него
     # не попало, теряется безвозвратно — окно движется только вперёд.
@@ -245,19 +258,22 @@ async def main_loop(config: Config) -> None:
     try:
         while not stop_event.is_set():
             backoff = False
+            channels_unreadable = False  # цикл упал — считаем, что не знаем
             if first_cycle and config.startup_lookback_messages > config.lookback_messages:
                 cycle_config = replace(
                     config, lookback_messages=config.startup_lookback_messages
                 )
                 logger.info(
-                    "Первый цикл после запуска: окно расширено до %d постов на канал "
-                    "(дальше — %d).",
+                    "Окно расширено до %d постов на канал (сузим до %d после цикла, "
+                    "который прочитает каналы).",
                     config.startup_lookback_messages, config.lookback_messages,
                 )
             else:
                 cycle_config = config
             try:
-                backoff = await run_cycle(cycle_config, reader, llm, http_client, resume_text)
+                result = await run_cycle(cycle_config, reader, llm, http_client, resume_text)
+                backoff = result.backoff
+                channels_unreadable = result.channels_unreadable
             except Exception as exc:  # noqa: BLE001 — цикл не должен падать целиком
                 logger.exception("Ошибка в цикле обработки: %s", exc)
                 crash = f"{type(exc).__name__}: {exc}"
@@ -279,12 +295,43 @@ async def main_loop(config: Config) -> None:
                 last_crash = crash
             else:
                 last_crash = None  # цикл прошёл — следующее падение снова уведомим
-                # Окно сужаем только после удачного цикла: если он упал, посты не
-                # помечены seen, и на повторе широкое окно ещё пригодится.
-                first_cycle = False
+                # Окно сужаем только после удачного цикла: если он упал или не прочитал
+                # ни одного канала, посты не помечены seen, и на повторе широкое окно
+                # ещё пригодится. Иначе единственная защита от потери постов за простой
+                # тратится на цикл, который ничего не прочитал.
+                if channels_unreadable:
+                    # Отдельные ошибки чтения в личку не шлём (шумно), но полное
+                    # отсутствие чтения — другое дело: бот молчит целиком, и без лога
+                    # об этом не узнать. Одно сообщение на инцидент, не каждый цикл.
+                    if not unreadable_notified:
+                        await send_error(
+                            config,
+                            http_client,
+                            title="📡 Каналы не читаются",
+                            details=[
+                                "Ни один канал не прочитан — соединение с t.me "
+                                "не установлено.",
+                                "Проверьте сеть и VPN на машине с ботом. "
+                                "Перезапуск не нужен.",
+                                f"Следующая попытка через {config.poll_interval_minutes} мин.",
+                            ],
+                        )
+                        unreadable_notified = True
+                else:
+                    if unreadable_notified:  # инцидент закончился — сообщаем один раз
+                        await send_error(
+                            config,
+                            http_client,
+                            title="✅ Чтение каналов восстановилось",
+                            details=["Бот снова читает каналы."],
+                        )
+                        unreadable_notified = False
+                    first_cycle = False
 
-            # После первого тихого прохода дальше работаем в обычном режиме.
-            if config.first_run_silent:
+            # После первого тихого прохода дальше работаем в обычном режиме. Если каналы
+            # не прочитаны, тихий проход своей работы не сделал (ничего не помечено seen)
+            # — режим не снимаем, иначе в обычном режиме прилетят все старые вакансии.
+            if config.first_run_silent and not channels_unreadable:
                 logger.info("Первый тихий проход выполнен, переходим в обычный режим.")
                 config = _clear_first_run_silent(config)
                 interval = config.poll_interval_minutes * 60

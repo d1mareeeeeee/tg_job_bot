@@ -47,13 +47,13 @@ TEST_MARK = "[ТЕСТ, не настоящая ошибка]"
 
 
 class StubReader:
-    """Отдаёт фиксированный набор постов, в сеть не ходит."""
+    """Отдаёт фиксированный набор постов, в сеть не ходит (каналы «прочитаны»)."""
 
     def __init__(self, posts):
         self._posts = posts
 
     async def fetch_new_posts(self, channels, lookback, is_seen):
-        return list(self._posts)
+        return list(self._posts), False
 
 
 class RaisingLLM:
@@ -105,11 +105,11 @@ async def scenario_call(http_client: httpx.AsyncClient) -> bool:
             f"'code': 429}}}} {TEST_MARK}"
         )
         print(f"Порог серии: {config.llm_failure_streak}, пауза: {config.llm_backoff_minutes} мин")
-        backoff = await m.run_cycle(
+        result = await m.run_cycle(
             config, StubReader(make_posts(3)), RaisingLLM(exc), http_client, "резюме кандидата"
         )
         seen = db._require_conn().execute("SELECT COUNT(*) FROM seen_posts;").fetchone()[0]
-        ok = check("запрошен backoff (провайдер лежит)", backoff is True)
+        ok = check("запрошен backoff (провайдер лежит)", result.backoff is True)
         ok &= check("посты НЕ потеряны (seen=0)", seen == 0, f"seen={seen}")
         return ok
     finally:
@@ -124,13 +124,13 @@ async def scenario_parse(http_client: httpx.AsyncClient) -> bool:
     db.init_db(config.db_path)
     try:
         exc = LLMParseError(f"не найден JSON в ответе модели {TEST_MARK}")
-        backoff = await m.run_cycle(
+        result = await m.run_cycle(
             config, StubReader(make_posts(1)), RaisingLLM(exc), http_client, "резюме кандидата"
         )
         conn = db._require_conn()
         seen = conn.execute("SELECT COUNT(*) FROM seen_posts;").fetchone()[0]
         rows = conn.execute("SELECT score, reason FROM matches;").fetchall()
-        ok = check("backoff не нужен (провайдер жив)", backoff is False)
+        ok = check("backoff не нужен (провайдер жив)", result.backoff is False)
         ok &= check("пост закрыт как обработанный (seen=1)", seen == 1, f"seen={seen}")
         ok &= check("в matches записан parse_error", rows == [(0, "parse_error")], str(rows))
         return ok

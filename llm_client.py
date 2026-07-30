@@ -243,7 +243,13 @@ def verify_free_model(config) -> None:
         resp.raise_for_status()
         models = resp.json()["data"]
     except Exception as exc:  # noqa: BLE001 — сбой проверки не должен ронять запуск
-        logger.warning("Не удалось проверить платность модели (%s) — пропускаю проверку.", exc)
+        logger.warning(
+            "Не удалось проверить платность модели (%s: %s) — пропускаю проверку. "
+            "Если ошибка сетевая или 403, проверьте доступ к openrouter.ai с этой "
+            "машины (в некоторых сетях нужен включённый VPN).",
+            type(exc).__name__,
+            exc,
+        )
         return
 
     info = next((m for m in models if m.get("id") == config.llm_model), None)
