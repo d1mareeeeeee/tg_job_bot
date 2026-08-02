@@ -51,6 +51,12 @@ def setup_logging(log_path: str) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def _short(text: str, limit: int) -> str:
+    """Однострочная выжимка текста для лога: без переносов, не длиннее limit."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 def load_resume(path: str) -> str:
     """Читает резюме из файла (один раз при старте). Кэшируется вызывающим кодом."""
     try:
@@ -119,6 +125,7 @@ async def run_cycle(
         # Дешёвый фильтр перед LLM, чтобы не жечь токены.
         if not looks_like_vacancy(post["text"]):
             db.mark_seen(channel, msg_id)
+            logger.info("Префильтр отсеял %s: %s", post["url"], _short(post["text"], 80))
             continue
         passed_filter += 1
 
@@ -178,6 +185,14 @@ async def run_cycle(
         else:
             scored += 1
             fail_streak = 0
+            # Оценку пишем в лог всегда. В matches попадают только прошедшие порог,
+            # поэтому без этой строки нельзя ответить на вопрос «почему ничего не
+            # пришло»: непонятно, вакансии были неподходящие или что-то сломалось.
+            logger.info(
+                "Оценка %d (порог %d): %s — %s | %s",
+                result["score"], config.match_threshold, post["url"],
+                result["role"] or "роль не указана", _short(result["reason"], 160),
+            )
 
         await asyncio.sleep(config.llm_rate_delay)  # rate-limit между вызовами LLM
 
